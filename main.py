@@ -96,15 +96,22 @@ async def version(ctx: slash.Context):
 
 guild_locks: Dict[int, asyncio.Lock] = {}
 
-def sound(name: str) -> Tuple[str, str]:
-    """Get the (message text, sound filename) from sound name."""
-    with open(os.path.join('sounds', name, 'sound.json')) as f:
-        text = json.load(f)['text']
-    return text, os.path.join('sounds', name, 'sound.mp3')
+def guild_root(guild_id: Optional[int]) -> str:
+    if guild_id:
+        return os.path.join('sounds', '.guild', str(guild_id))
+    return 'sounds'
 
-def sound_source(name: str) -> Tuple[str, discord.FFmpegOpusAudio]:
+def sound(name: str, guild_id: Optional[int]) -> Tuple[str, str]:
+    """Get the (message text, sound filename) from sound name."""
+    root = guild_root(guild_id)
+    with open(os.path.join(root, name, 'sound.json')) as f:
+        text = json.load(f)['text']
+    return text, os.path.join(root, name, 'sound.mp3')
+
+def sound_source(name: str, guild_id: Optional[int]) \
+        -> Tuple[str, discord.FFmpegOpusAudio]:
     """Get the FFmpegOpusAudio source from sound name."""
-    text, fn = sound(name)
+    text, fn = sound(name, guild_id)
     fn = fn.rsplit('.', 1)[0] + '.opus'
     return text, discord.FFmpegOpusAudio(fn, codec='copy')
 
@@ -121,8 +128,8 @@ async def play_in_voice(ctx: slash.Context, name: str, channel: discord.VoiceCha
     """Play the sound in a voice channel."""
     lock = guild_locks.setdefault(ctx.guild.id, asyncio.Lock())
     async with lock:
-        text, source = sound_source(name)
-        asyncio.create_task(ctx.respond(text)) # send Bruh
+        text, source = sound_source(name, ctx.command.guild_id)
+        asyncio.create_task(ctx.respond(text, ephemeral=True)) # send Bruh
         # if things error past here, we've already sent the message
         try:
             vc: Optional[discord.VoiceClient] = ctx.guild.voice_client
@@ -131,7 +138,7 @@ async def play_in_voice(ctx: slash.Context, name: str, channel: discord.VoiceCha
                 await vc.move_to(channel)
             elif vc is None:
                 # haven't been playing, join author's channel
-                vc = await channel.connect()
+                vc = await channel.connect(timeout=5)
             # convert callback-based to awaiting
             fut: asyncio.Future = client.loop.create_future()
             def after(exc):
@@ -147,34 +154,38 @@ async def play_in_voice(ctx: slash.Context, name: str, channel: discord.VoiceCha
 
 async def execute(ctx: slash.Context, name: str):
     """Play or upload the sound."""
-    await ctx.respond(
-        rtype=slash.InteractionResponseType.DeferredChannelMessageWithSource)
-    sent = False
-    if ctx.author.voice is not None and ctx.author.voice.channel is not None:
-        # the Bruh message is always guaranteed to be sent by play_in_voice
-        # so even if it fails now, don't send it again when falling back
-        sent = True
+    v = ctx.author.voice is not None and ctx.author.voice.channel is not None
+    if v:
         try:
             await play_in_voice(ctx, name, ctx.author.voice.channel)
-        except discord.HTTPException:
-            pass # fallback to file upload
+        except (discord.HTTPException, asyncio.TimeoutError):
+            return # we did our best
         else:
             return # success, stop here
-    text, fn = sound(name)
-    if not sent:
-        await ctx.respond(text)
-    await ctx.send(file=discord.File(fn, filename=name + '.mp3'))
+    else:
+        text, fn = sound(name, ctx.command.guild_id)
+        f = discord.File(fn, filename=name + '.mp3')
+        await ctx.respond(text, file=f)
 
-for name in os.listdir('sounds'):
-    if not name.isalpha():
+def load_guild(guild_id: Optional[int]):
+    root = guild_root(guild_id)
+    for name in os.listdir(root):
+        if not name.isalpha():
+            continue
+        with open(os.path.join(root, name, 'sound.json')) as f:
+            descname = json.load(f)['name']
+        desc = f"Play a {descname} sound effect."
+        print('adding', name, guild_id, desc)
+        @client.slash_cmd(name=name, description=desc, guild_id=guild_id)
+        async def __cmd(ctx: slash.Context, n=name):
+            """Closure for /(name)"""
+            await execute(ctx, n)
+
+load_guild(None)
+for sid in os.listdir(os.path.join('sounds', '.guild')):
+    if not sid.isdigit():
         continue
-    with open(os.path.join('sounds', name, 'sound.json')) as f:
-        descname = json.load(f)['name']
-    desc = f"Play a {descname} sound effect."
-    @client.slash_cmd(name=name, description=desc)
-    async def cmd(ctx: slash.Context, n=name):
-        """Closure for /(name)"""
-        await execute(ctx, n)
+    load_guild(int(sid))
 
 ### DYNAMIC COMMANDS TECH END ###
 
