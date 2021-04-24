@@ -1,2 +1,2 @@
-discord.py
-discord-ext-slash
+discord.py<1.8
+discord-ext-slash>=0.6.0

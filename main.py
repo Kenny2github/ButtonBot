@@ -75,13 +75,13 @@ async def on_command_error(ctx, exc):
 @client.slash_cmd()
 async def hello(ctx: slash.Context):
     """Hello World!"""
-    await ctx.respond('Hello World!', flags=slash.MessageFlags.EPHEMERAL)
+    await ctx.respond('Hello World!', ephemeral=True)
 
 @client.slash_cmd()
 async def invite(ctx: slash.Context):
     """Get a link to add the bot in your own server."""
     url = CONFIG.get('url', 'No invite configured! Contact bot owner.')
-    await ctx.respond(url, flags=slash.MessageFlags.EPHEMERAL)
+    await ctx.respond(url, ephemeral=True)
 
 @client.slash_cmd()
 async def version(ctx: slash.Context):
@@ -90,7 +90,7 @@ async def version(ctx: slash.Context):
     VERSION = subprocess.check_output(
         f"cd {SRCDIR} && git rev-parse --short HEAD", shell=True
     ).decode('ascii').strip()
-    await ctx.respond(f'`{VERSION}`', flags=slash.MessageFlags.EPHEMERAL)
+    await ctx.respond(f'`{VERSION}`', ephemeral=True)
 
 ### DYNAMIC COMMANDS TECH ###
 
