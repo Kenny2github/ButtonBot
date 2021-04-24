@@ -2,3 +2,4 @@ buttonbot.json
 .vs*
 *.pyc
 __pycache__/
+sounds/.guild/*/
