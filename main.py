@@ -1,26 +1,33 @@
 import sys
 import os
+import shutil
 import json
-from typing import Dict, Optional, Tuple
+import re
+from typing import Dict, Optional, Tuple, Union
 import traceback
-import subprocess
 import asyncio
+import aiohttp
 import discord
 from discord.ext import slash
 from discord.ext import commands
 
 SRCDIR = os.path.dirname(os.path.abspath(__file__))
-VERSION = subprocess.check_output(
-    f"cd {SRCDIR} && git rev-parse --short HEAD", shell=True
-).decode('ascii').strip()
+VERSION = None
 CONFIG_FILE = 'buttonbot.json'
 LEAVE_DELAY = 1
+NAME_REGEX = re.compile(r'^[a-z0-9]{1,32}$')
 os.chdir(SRCDIR)
 
 with open(CONFIG_FILE) as f:
     CONFIG = json.load(f)
 
+try:
+    loop = asyncio.ProactorEventLoop()
+except AttributeError:
+    loop = asyncio.get_event_loop()
+
 client = slash.SlashBot(
+    loop=loop,
     description='A bot that plays sound effects',
     command_prefix='/',
     help_command=None,
@@ -39,6 +46,13 @@ except IOError:
 except IndexError:
     pass # not specified, use stdout
 
+async def send_error(method, msg):
+    await method(embed=discord.Embed(
+        title='Error',
+        description=msg,
+        color=0xff0000
+    ))
+
 @client.event
 async def on_command_error(ctx, exc):
     if hasattr(ctx.command, 'on_error'):
@@ -55,11 +69,7 @@ async def on_command_error(ctx, exc):
         commands.BadArgument,
         commands.CommandOnCooldown,
     )):
-        return await ctx.send(embed=discord.Embed(
-            title='Error',
-            description=str(exc),
-            color=0xff0000
-        ))
+        return await send_error(ctx.send, str(exc))
     if isinstance(exc, (
         commands.CheckFailure,
         commands.CommandNotFound,
@@ -87,9 +97,11 @@ async def invite(ctx: slash.Context):
 async def version(ctx: slash.Context):
     """Get the Git version this bot is running on."""
     global VERSION
-    VERSION = subprocess.check_output(
-        f"cd {SRCDIR} && git rev-parse --short HEAD", shell=True
-    ).decode('ascii').strip()
+    proc = await asyncio.create_subprocess_shell(
+        f"cd {SRCDIR} && git rev-parse --short HEAD",
+        stdout=asyncio.subprocess.PIPE)
+    stdout, _ = proc.communicate()
+    VERSION = stdout.decode('ascii').strip()
     await ctx.respond(f'`{VERSION}`', ephemeral=True)
 
 ### DYNAMIC COMMANDS TECH ###
@@ -168,9 +180,14 @@ async def execute(ctx: slash.Context, name: str):
         await ctx.respond(text, file=f)
 
 def load_guild(guild_id: Optional[int]):
+    if guild_id:
+        for _cmd in tuple(client.slash):
+            if _cmd.guild_id == guild_id:
+                # remove all commands from this guild first
+                client.slash.discard(_cmd)
     root = guild_root(guild_id)
     for name in os.listdir(root):
-        if not name.isalpha():
+        if not NAME_REGEX.match(name):
             continue
         with open(os.path.join(root, name, 'sound.json')) as f:
             descname = json.load(f)['name']
@@ -189,8 +206,133 @@ for sid in os.listdir(os.path.join('sounds', '.guild')):
 
 ### DYNAMIC COMMANDS TECH END ###
 
+async def msg_input(ctx: slash.Context, prompt: str, content: bool = True) \
+        -> Union[str, discord.Message]:
+    await ctx.respond(prompt)
+    msg = await client.wait_for('message', timeout=60.0, check=lambda m: (
+        m.channel.id == ctx.channel.id
+        and m.author.id == ctx.author.id
+    ))
+    if content:
+        return msg.content
+    return msg
+
+def cleanup_failure(fn: str, root: str):
+    # remove the tmp file if it exists
+    try:
+        os.remove(fn)
+    except FileNotFoundError:
+        pass
+    # remove the command directory if it's empty
+    try:
+        os.rmdir(root)
+    except OSError:
+        pass
+
+name_opt = slash.Option(
+    'The /name of the command (alphanumeric only).',
+    required=True)
+
+@client.slash_cmd()
+async def cmd(ctx: slash.Context, name: name_opt):
+    """Create a new guild command."""
+    try:
+        text = await msg_input(ctx, 'Send the **exact text** '
+                               'to use as the command text. (Send "cancel" '
+                               'three times to cancel this addition.)')
+        desc = await msg_input(ctx, 'Send the name of the sound effect '
+                               '(goes in the command description).')
+        audf = await msg_input(ctx, 'Send a link to, or upload, '
+                               'the ffmpeg-compatible sound file.', False)
+    except asyncio.TimeoutError:
+        await send_error(ctx.webhook.send, 'Timed out waiting for message.')
+        return
+    root = os.path.join(guild_root(ctx.guild.id), name)
+    try:
+        os.mkdir(root)
+    except FileExistsError:
+        pass
+    if audf.attachments:
+        audf = audf.attachments[0]
+        try:
+            fn = 'tmp.' + audf.filename.rsplit('.', 1)[1]
+            fn = os.path.join(root, fn)
+            await audf.save(fn)
+        except IndexError:
+            await send_error(ctx.webhook.send, 'Failed to download attachment'
+                             ': Does not seem to be ffmpeg-compatible')
+        except discord.HTTPException as exc:
+            await send_error(ctx.webhook.send, 'Failed to download attachment'
+                             f': {exc!s}')
+            return
+    else:
+        try:
+            fn = 'tmp.' + audf.content.strip().rsplit('.', 1)[1]
+            fn = os.path.join(root, fn)
+            async with aiohttp.ClientSession() as sesh:
+                async with sesh.get(audf.content.strip()) as resp:
+                    resp.raise_for_status()
+                    CHUNK = 1024*1024
+                    chunk = await resp.content.read(CHUNK)
+                    with open(fn, 'wb') as f:
+                        while chunk:
+                            f.write(chunk)
+                            chunk = await resp.content.read(CHUNK)
+        except (IndexError, aiohttp.InvalidURL):
+            await send_error(ctx.webhook.send, 'Failed to download link: '
+                             'Invalid URL')
+            return
+        except aiohttp.ClientError as exc:
+            await send_error(ctx.webhook.send,
+                             f'Failed to download link: {exc!s}')
+            cleanup_failure(fn, root)
+            return
+    MP3 = os.path.join(root, 'sound.mp3')
+    OPUS = os.path.join(root, 'sound.opus')
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            'ffmpeg', '-i', fn, MP3, OPUS,
+            stderr=asyncio.subprocess.PIPE)
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            stderr = stderr.decode()
+            stderr = stderr.rsplit('  lib', 1)[1].split('\n', 1)[1]
+            await send_error(ctx.webhook.send,
+                             'Failed to convert audio:\n'
+                             '```\n%s\n```' % stderr)
+            return
+    finally:
+        cleanup_failure(fn, root)
+    with open(os.path.join(root, 'sound.json'), 'w') as f:
+        json.dump({'text': text, 'name': desc}, f)
+    load_guild(ctx.guild.id)
+    await client.register_commands(ctx.guild.id)
+    await ctx.webhook.send(f'Successfully added/modified `/{name}`')
+
+@client.slash_cmd(name='-cmd')
+async def del_cmd(ctx: slash.Context, name: name_opt):
+    """Remove a command, if it exists."""
+    root = os.path.join(guild_root(ctx.guild.id), name)
+    shutil.rmtree(root, True)
+    load_guild(ctx.guild.id)
+    await client.register_commands(ctx.guild.id)
+    await ctx.respond(f'Removed `/{name}` if it exists')
+
+@cmd.check
+@del_cmd.check
+async def cmd_check(ctx: slash.Context):
+    if not ctx.author.guild_permissions.manage_guild:
+        await send_error(ctx.respond, 'You must have Manage Server '
+                         'permissions to use this command.')
+        return False
+    name = ctx.options['name'].casefold()
+    if not NAME_REGEX.match(name):
+        await send_error(ctx.respond, 'Command name must consist '
+                         'only of 1-32 letters and numbers')
+        return False
+    return True
+
 async def wakeup():
-    await client.wait_until_ready()
     while 1:
         try:
             await asyncio.sleep(1)

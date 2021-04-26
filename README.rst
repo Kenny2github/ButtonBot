@@ -9,4 +9,7 @@ A Bruh/NUT/etc-button bot. Using ``/bruh`` as an example, running the command:
 
 Adding Sound Effects
 --------------------
-See the ``README.md`` in ``sounds/``
+
+See the ``README.md`` in ``sounds/`` for adding global commands.
+
+See the ``README.md`` in ``sounds/.guild/`` for adding server commands.
