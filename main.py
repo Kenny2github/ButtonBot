@@ -100,7 +100,7 @@ async def version(ctx: slash.Context):
     proc = await asyncio.create_subprocess_shell(
         f"cd {SRCDIR} && git rev-parse --short HEAD",
         stdout=asyncio.subprocess.PIPE)
-    stdout, _ = proc.communicate()
+    stdout, _ = await proc.communicate()
     VERSION = stdout.decode('ascii').strip()
     await ctx.respond(f'`{VERSION}`', ephemeral=True)
 
