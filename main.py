@@ -39,7 +39,7 @@ client = slash.SlashBot(
 
 try:
     if sys.argv[1] != '-':
-        sys.stdout = sys.stderr = open(sys.argv[1])
+        sys.stdout = sys.stderr = open(sys.argv[1], 'a')
 except IOError:
     print(f"Couldn't open output file {sys.argv[1]!r}, quitting")
     raise SystemExit(1) from None
@@ -204,12 +204,6 @@ def load_guild(guild_id: Optional[int]):
             """Closure for /(name)"""
             await execute(ctx, n)
 
-load_guild(None)
-for sid in os.listdir(os.path.join('sounds', '.guild')):
-    if not sid.isdigit():
-        continue
-    load_guild(int(sid))
-
 ### DYNAMIC COMMANDS TECH END ###
 
 async def msg_input(ctx: slash.Context, prompt: str, content: bool = True) \
@@ -351,5 +345,13 @@ if '-v' in sys.argv:
     logging.basicConfig()
     logging.getLogger('discord.ext.slash').setLevel(logging.DEBUG)
 
-client.loop.create_task(wakeup())
-client.run(CONFIG['token'])
+try:
+    load_guild(None)
+    for sid in os.listdir(os.path.join('sounds', '.guild')):
+        if not sid.isdigit():
+            continue
+        load_guild(int(sid))
+    client.loop.create_task(wakeup())
+    client.run(CONFIG['token'])
+finally:
+    sys.stdout.close()
