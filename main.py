@@ -189,6 +189,12 @@ def load_guild(guild_id: Optional[int]):
     for name in os.listdir(root):
         if not NAME_REGEX.match(name):
             continue
+        try:
+            os.rmdir(os.path.join(root, name))
+        except OSError:
+            pass # not empty, can probably be used
+        else:
+            continue # was empty, skip
         with open(os.path.join(root, name, 'sound.json')) as f:
             descname = json.load(f)['name']
         desc = f"Play a {descname} sound effect."
@@ -339,6 +345,11 @@ async def wakeup():
         except:
             await client.close()
             return
+
+if '-v' in sys.argv:
+    import logging
+    logging.basicConfig()
+    logging.getLogger('discord.ext.slash').setLevel(logging.DEBUG)
 
 client.loop.create_task(wakeup())
 client.run(CONFIG['token'])
