@@ -287,6 +287,14 @@ async def cmd(ctx: slash.Context, name: name_opt):
     MP3 = os.path.join(root, 'sound.mp3')
     OPUS = os.path.join(root, 'sound.opus')
     try:
+        os.remove(MP3)
+    except FileNotFoundError:
+        pass
+    try:
+        os.remove(OPUS)
+    except FileNotFoundError:
+        pass
+    try:
         proc = await asyncio.create_subprocess_exec(
             'ffmpeg', '-i', fn, MP3, OPUS,
             stderr=asyncio.subprocess.PIPE)
