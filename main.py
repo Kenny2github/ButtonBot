@@ -79,7 +79,7 @@ async def on_command_error(ctx, exc):
     print('Ignoring exception in command {}:\n'.format(ctx.command)
         + ''.join(traceback.format_exception(
             type(exc), exc, exc.__traceback__
-        )),
+        )), flush=True
     )
 
 @client.slash_cmd()
@@ -198,7 +198,7 @@ def load_guild(guild_id: Optional[int]):
         with open(os.path.join(root, name, 'sound.json')) as f:
             descname = json.load(f)['name']
         desc = f"Play a {descname} sound effect."
-        print('adding', name, guild_id, desc)
+        print('adding', name, guild_id, desc, flush=True)
         @client.slash_cmd(name=name, description=desc, guild_id=guild_id)
         async def __cmd(ctx: slash.Context, n=name):
             """Closure for /(name)"""
