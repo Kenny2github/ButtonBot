@@ -3,3 +3,4 @@ buttonbot.json
 *.pyc
 __pycache__/
 sounds/.guild/*/
+*.log
