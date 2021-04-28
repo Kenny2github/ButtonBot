@@ -248,10 +248,7 @@ async def cmd(ctx: slash.Context, name: name_opt):
         await send_error(ctx.webhook.send, 'Timed out waiting for message.')
         return
     root = os.path.join(guild_root(ctx.guild.id), name)
-    try:
-        os.mkdir(root)
-    except FileExistsError:
-        pass
+    os.makedirs(root, exist_ok=True)
     if audf.attachments:
         audf = audf.attachments[0]
         try:
