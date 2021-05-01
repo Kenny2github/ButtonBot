@@ -164,10 +164,10 @@ async def play_in_voice(ctx: slash.Context, name: str, channel: discord.VoiceCha
             # finished playing (hopefully)
             asyncio.create_task(wait_and_unset(ctx, channel))
 
-async def execute(ctx: slash.Context, name: str):
+async def execute(ctx: slash.Context, chat: bool, name: str):
     """Play or upload the sound."""
     v = ctx.author.voice is not None and ctx.author.voice.channel is not None
-    if v:
+    if v and not chat:
         try:
             await play_in_voice(ctx, name, ctx.author.voice.channel)
         except (discord.HTTPException, asyncio.TimeoutError):
@@ -186,6 +186,9 @@ def load_guild(guild_id: Optional[int]):
                 # remove all commands from this guild first
                 client.slash.discard(_cmd)
     root = guild_root(guild_id)
+    chat_opt = slash.Option(
+        "If True, sends the sound in chat even if you're in voice.",
+        type=slash.ApplicationCommandOptionType.BOOLEAN)
     for name in os.listdir(root):
         if not NAME_REGEX.match(name):
             continue
@@ -200,9 +203,9 @@ def load_guild(guild_id: Optional[int]):
         desc = f"Play a {descname} sound effect."
         print('adding', name, guild_id, desc, flush=True)
         @client.slash_cmd(name=name, description=desc, guild_id=guild_id)
-        async def __cmd(ctx: slash.Context, n=name):
+        async def __cmd(ctx: slash.Context, chat: chat_opt = False, n=name):
             """Closure for /(name)"""
-            await execute(ctx, n)
+            await execute(ctx, chat, n)
 
 ### DYNAMIC COMMANDS TECH END ###
 
