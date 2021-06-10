@@ -140,7 +140,7 @@ async def play_in_voice(ctx: slash.Context, name: str, channel: discord.VoiceCha
     """Play the sound in a voice channel."""
     lock = guild_locks.setdefault(ctx.guild.id, asyncio.Lock())
     if lock.locked():
-        await ctx.respond(deferred=True)
+        await ctx.respond(deferred=True, ephemeral=True)
     async with lock:
         text, source = sound_source(name, ctx.command.guild_id)
         asyncio.create_task(ctx.respond(text, ephemeral=True)) # send Bruh
