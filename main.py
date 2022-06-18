@@ -1,5 +1,6 @@
 import sys
 import os
+from pathlib import Path
 import shutil
 import json
 import re
@@ -8,10 +9,10 @@ import traceback
 import asyncio
 import aiohttp
 import discord
-from discord.ext import slash
+from discord import app_commands
 from discord.ext import commands
 
-SRCDIR = os.path.dirname(os.path.abspath(__file__))
+SRCDIR = Path(__file__).resolve().parent
 VERSION = None
 CONFIG_FILE = 'buttonbot.json'
 LEAVE_DELAY = 1
@@ -21,21 +22,61 @@ os.chdir(SRCDIR)
 with open(CONFIG_FILE) as f:
     CONFIG = json.load(f)
 
-try:
-    loop = asyncio.ProactorEventLoop()
-except AttributeError:
-    loop = asyncio.get_event_loop()
+async def send_error(method, msg):
+    await method(embed=discord.Embed(
+        title='Error',
+        description=msg,
+        color=0xff0000
+    ))
 
-client = slash.SlashBot(
-    loop=loop,
-    description='A bot that plays sound effects',
-    command_prefix='/',
-    help_command=None,
-    activity=discord.Activity(type=discord.ActivityType.watching, name='/'),
-    debug_guild=CONFIG.get('guild_id', None),
-    resolve_not_fetch=False,
-    fetch_if_not_get=True
-)
+class ButtonTree(app_commands.CommandTree):
+    async def on_command_error(self, ctx: discord.Interaction,
+                               exc: Exception) -> None:
+        if ctx.command:
+            if ctx.command.on_error:
+                return # has its own handler
+        else:
+            return # no valid command
+        if isinstance(exc, (
+            commands.BotMissingPermissions,
+            commands.MissingPermissions,
+            commands.MissingRequiredArgument,
+            commands.BadArgument,
+            commands.CommandOnCooldown,
+        )) and isinstance(ctx.channel, discord.abc.Messageable):
+            return await send_error(ctx.channel.send, str(exc))
+        if isinstance(exc, (
+            commands.CheckFailure,
+            commands.CommandNotFound,
+            commands.TooManyArguments,
+        )):
+            return
+        print('Ignoring exception in command {}:\n'.format(ctx.command)
+            + ''.join(traceback.format_exception(
+                type(exc), exc, exc.__traceback__
+            )), flush=True
+        )
+
+class ButtonBot(commands.Bot):
+    def __init__(self) -> None:
+        super().__init__(
+            description='A bot that plays sound effects',
+            command_prefix='/',
+            intents=discord.Intents.default()
+            | discord.Intents(message_content=True),
+            help_command=None,
+            activity=discord.Activity(type=discord.ActivityType.watching, name='/'),
+        )
+
+    async def setup_hook(self) -> None:
+        asyncio.create_task(wakeup())
+        debug_guild_id = CONFIG.get('guild_id', None)
+        if debug_guild_id:
+            debug_guild = discord.Object(debug_guild_id)
+            self.tree.copy_global_to(guild=debug_guild)
+            await self.tree.sync(guild=debug_guild)
+
+client = ButtonBot()
 
 try:
     if sys.argv[1] != '-':
@@ -46,55 +87,19 @@ except IOError:
 except IndexError:
     pass # not specified, use stdout
 
-async def send_error(method, msg):
-    await method(embed=discord.Embed(
-        title='Error',
-        description=msg,
-        color=0xff0000
-    ))
-
-@client.event
-async def on_command_error(ctx, exc):
-    if hasattr(ctx.command, 'on_error'):
-        return
-    cog = ctx.cog
-    if cog:
-        attr = 'on_error'
-        if hasattr(cog, attr):
-            return
-    if isinstance(exc, (
-        commands.BotMissingPermissions,
-        commands.MissingPermissions,
-        commands.MissingRequiredArgument,
-        commands.BadArgument,
-        commands.CommandOnCooldown,
-    )):
-        return await send_error(ctx.send, str(exc))
-    if isinstance(exc, (
-        commands.CheckFailure,
-        commands.CommandNotFound,
-        commands.TooManyArguments,
-    )):
-        return
-    print('Ignoring exception in command {}:\n'.format(ctx.command)
-        + ''.join(traceback.format_exception(
-            type(exc), exc, exc.__traceback__
-        )), flush=True
-    )
-
-@client.slash_cmd()
-async def hello(ctx: slash.Context):
+@client.tree.command()
+async def hello(ctx: discord.Interaction):
     """Hello World!"""
-    await ctx.respond('Hello World!', ephemeral=True)
+    await ctx.response.send_message('Hello World!', ephemeral=True)
 
-@client.slash_cmd()
-async def invite(ctx: slash.Context):
+@client.tree.command()
+async def invite(ctx: discord.Interaction):
     """Get a link to add the bot in your own server."""
     url = CONFIG.get('url', 'No invite configured! Contact bot owner.')
-    await ctx.respond(url, ephemeral=True)
+    await ctx.response.send_message(url, ephemeral=True)
 
-@client.slash_cmd()
-async def version(ctx: slash.Context):
+@client.tree.command()
+async def version(ctx: discord.Interaction):
     """Get the Git version this bot is running on."""
     global VERSION
     proc = await asyncio.create_subprocess_shell(
@@ -102,51 +107,62 @@ async def version(ctx: slash.Context):
         stdout=asyncio.subprocess.PIPE)
     stdout, _ = await proc.communicate()
     VERSION = stdout.decode('ascii').strip()
-    await ctx.respond(f'`{VERSION}`', ephemeral=True)
+    await ctx.response.send_message(f'`{VERSION}`', ephemeral=True)
 
 ### DYNAMIC COMMANDS TECH ###
 
 guild_locks: Dict[int, asyncio.Lock] = {}
 
-def guild_root(guild_id: Optional[int]) -> str:
+def guild_root(guild_id: Optional[int]) -> Path:
     if guild_id:
-        return os.path.join('sounds', '.guild', str(guild_id))
-    return 'sounds'
+        return Path('sounds') / '.guild' / str(guild_id)
+    return Path('sounds')
 
-def sound(name: str, guild_id: Optional[int]) -> Tuple[str, str]:
+def sound(name: str, guild_id: Optional[int]) -> Tuple[str, Path]:
     """Get the (message text, sound filename) from sound name."""
     root = guild_root(guild_id)
-    with open(os.path.join(root, name, 'sound.json')) as f:
+    with open(root / name / 'sound.json') as f:
         text = json.load(f)['text']
-    return text, os.path.join(root, name, 'sound.mp3')
+    return text, root / name / 'sound.mp3'
 
 def sound_source(name: str, guild_id: Optional[int]) \
         -> Tuple[str, discord.FFmpegOpusAudio]:
     """Get the FFmpegOpusAudio source from sound name."""
     text, fn = sound(name, guild_id)
-    fn = fn.rsplit('.', 1)[0] + '.opus'
+    fn = str(fn).rsplit('.', 1)[0] + '.opus'
     return text, discord.FFmpegOpusAudio(fn, codec='copy')
 
-async def wait_and_unset(ctx: slash.Context, last: discord.VoiceChannel):
+async def wait_and_unset(vc: discord.VoiceClient):
     """Wait a few seconds before leaving."""
     await asyncio.sleep(LEAVE_DELAY)
-    vc = ctx.guild.voice_client
     if vc is not None and not vc.is_playing():
         # - not already left
         # - not playing audio anymore
         await vc.disconnect() # so leave
 
-async def play_in_voice(ctx: slash.Context, name: str, channel: discord.VoiceChannel):
+async def play_in_voice(
+    ctx: discord.Interaction, name: str,
+    channel: Union[discord.VoiceChannel, discord.StageChannel],
+    guild: Optional[discord.abc.Snowflake]
+) -> None:
     """Play the sound in a voice channel."""
+    if ctx.guild is None or not isinstance(ctx.command, app_commands.Command):
+        print('play_in_voice called from outside guild or command?')
+        return
     lock = guild_locks.setdefault(ctx.guild.id, asyncio.Lock())
-    if lock.locked():
-        await ctx.respond(deferred=True, ephemeral=True)
+    locked = lock.locked()
+    if locked:
+        await ctx.response.defer(ephemeral=True)
     async with lock:
-        text, source = sound_source(name, ctx.command.guild_id)
-        asyncio.create_task(ctx.respond(text, ephemeral=True)) # send Bruh
+        text, source = sound_source(name, guild.id if guild else None)
+        if locked: # i.e. was deferred
+            asyncio.create_task(ctx.edit_original_message(content=text))
+        else:
+            asyncio.create_task(ctx.response.send_message(text, ephemeral=True))
         # if things error past here, we've already sent the message
+        vc: Optional[discord.VoiceClient] \
+            = ctx.guild.voice_client # type: ignore # not customized
         try:
-            vc: Optional[discord.VoiceClient] = ctx.guild.voice_client
             if vc is not None and vc.channel.id != channel.id:
                 # finished playing in another channel, move to author's channel
                 await vc.move_to(channel)
@@ -164,65 +180,70 @@ async def play_in_voice(ctx: slash.Context, name: str, channel: discord.VoiceCha
             await fut
         finally:
             # finished playing (hopefully)
-            asyncio.create_task(wait_and_unset(ctx, channel))
+            if vc is not None:
+                asyncio.create_task(wait_and_unset(vc))
 
-async def execute(ctx: slash.Context, chat: bool, name: str):
+async def execute(ctx: discord.Interaction, chat: bool, name: str,
+                  guild: Optional[discord.abc.Snowflake]) -> None:
     """Play or upload the sound."""
-    v = ctx.author.voice is not None and ctx.author.voice.channel is not None
-    if v and not chat:
+    assert isinstance(ctx.user, discord.Member) \
+        and isinstance(ctx.command, app_commands.Command)
+    if ctx.user.voice is not None and ctx.user.voice.channel \
+            is not None and not chat:
         try:
-            await play_in_voice(ctx, name, ctx.author.voice.channel)
+            await play_in_voice(ctx, name, ctx.user.voice.channel, guild)
         except (discord.HTTPException, asyncio.TimeoutError):
             return # we did our best
         else:
             return # success, stop here
     else:
-        text, fn = sound(name, ctx.command.guild_id)
+        text, fn = sound(name, guild.id if guild else None)
         f = discord.File(fn, filename=name + '.mp3')
-        await ctx.respond(text, file=f)
+        await ctx.response.send_message(text, file=f)
+
+def make_cmd(name: str, desc: str,
+             guild: Optional[discord.abc.Snowflake]) -> None:
+    @client.tree.command(name=name, description=desc, guild=guild)
+    @app_commands.describe(
+        chat="If True, sends the sound in chat even if you're in voice.")
+    @app_commands.guild_only
+    async def __cmd(ctx: discord.Interaction, chat: bool = False):
+        """Closure for /(name)"""
+        await execute(ctx, chat, name, guild)
 
 def load_guild(guild_id: Optional[int]):
     if guild_id:
-        for _cmd in tuple(client.slash):
-            if _cmd.guild_id == guild_id:
-                # remove all commands from this guild first
-                client.slash.discard(_cmd)
+        guild = discord.Object(guild_id)
+        client.tree.clear_commands(guild=guild)
+    else:
+        guild = None
     root = guild_root(guild_id)
-    chat_opt = slash.Option(
-        "If True, sends the sound in chat even if you're in voice.",
-        type=slash.ApplicationCommandOptionType.BOOLEAN)
     for name in os.listdir(root):
         if not NAME_REGEX.match(name):
             continue
         try:
-            os.rmdir(os.path.join(root, name))
+            os.rmdir(root / name)
         except OSError:
             pass # not empty, can probably be used
         else:
             continue # was empty, skip
-        with open(os.path.join(root, name, 'sound.json')) as f:
+        with open(root / name / 'sound.json') as f:
             descname = json.load(f)['name']
         desc = f"Play a {descname} sound effect."
         print('adding', name, guild_id, desc, flush=True)
-        @client.slash_cmd(name=name, description=desc, guild_id=guild_id)
-        async def __cmd(ctx: slash.Context, chat: chat_opt = False, n=name):
-            """Closure for /(name)"""
-            await execute(ctx, chat, n)
+        make_cmd(name, desc, guild)
 
 ### DYNAMIC COMMANDS TECH END ###
 
-async def msg_input(ctx: slash.Context, prompt: str, content: bool = True) \
-        -> Union[str, discord.Message]:
-    await ctx.respond(prompt)
+async def msg_input(ctx: discord.Interaction, prompt: str) -> discord.Message:
+    await ctx.response.send_message(prompt)
     msg = await client.wait_for('message', timeout=60.0, check=lambda m: (
-        m.channel.id == ctx.channel.id
-        and m.author.id == ctx.author.id
+        m.channel.id == ctx.channel_id
+        and m.author.id == ctx.user.id
     ))
-    if content:
-        return msg.content
     return msg
 
-def cleanup_failure(fn: str, root: str):
+def cleanup_failure(fn: Path, root: Path):
     # remove the tmp file if it exists
     try:
         os.remove(fn)
@@ -234,13 +255,11 @@ def cleanup_failure(fn: str, root: str):
     except OSError:
         pass
 
-name_opt = slash.Option(
-    'The /name of the command (alphanumeric only).',
-    required=True)
-
-@client.slash_cmd()
-async def cmd(ctx: slash.Context, name: name_opt):
+@client.tree.command()
+@app_commands.describe(name='The /name of the command (alphanumeric only).')
+async def cmd(ctx: discord.Interaction, name: str):
     """Create a new guild command."""
+    assert ctx.guild is not None
     try:
         text = await msg_input(ctx, 'Send the **exact text** '
                                'to use as the command text. (Send "cancel" '
@@ -248,49 +267,56 @@ async def cmd(ctx: slash.Context, name: name_opt):
         desc = await msg_input(ctx, 'Send the name of the sound effect '
                                '(goes in the command description).')
         audf = await msg_input(ctx, 'Send a link to, or upload, '
-                               'the ffmpeg-compatible sound file.', False)
+                               'the ffmpeg-compatible sound file.')
     except asyncio.TimeoutError:
-        await send_error(ctx.webhook.send, 'Timed out waiting for message.')
+        await send_error(ctx.followup.send, 'Timed out waiting for message.')
         return
-    root = os.path.join(guild_root(ctx.guild.id), name)
+    text = text.content
+    desc = desc.content
+    root = guild_root(ctx.guild.id) / name
     os.makedirs(root, exist_ok=True)
     if audf.attachments:
         audf = audf.attachments[0]
         try:
             fn = 'tmp.' + audf.filename.rsplit('.', 1)[1]
-            fn = os.path.join(root, fn)
-            await audf.save(fn)
+            fn = root / fn
         except IndexError:
-            await send_error(ctx.webhook.send, 'Failed to download attachment'
+            await send_error(ctx.followup.send, 'Failed to download attachment'
                              ': Does not seem to be ffmpeg-compatible')
+            return
+        try:
+            await audf.save(fn)
         except discord.HTTPException as exc:
-            await send_error(ctx.webhook.send, 'Failed to download attachment'
+            await send_error(ctx.followup.send, 'Failed to download attachment'
                              f': {exc!s}')
             return
     else:
         try:
             fn = 'tmp.' + audf.content.strip().rsplit('.', 1)[1]
-            fn = os.path.join(root, fn)
+            fn = root / fn
+        except IndexError:
+            await send_error(ctx.followup.send, 'Failed to download link: '
+                             'Invalid URL')
+            return
+        try:
             async with aiohttp.ClientSession() as sesh:
                 async with sesh.get(audf.content.strip()) as resp:
                     resp.raise_for_status()
                     CHUNK = 1024*1024
-                    chunk = await resp.content.read(CHUNK)
                     with open(fn, 'wb') as f:
-                        while chunk:
+                        while chunk := await resp.content.read(CHUNK):
                             f.write(chunk)
-                            chunk = await resp.content.read(CHUNK)
-        except (IndexError, aiohttp.InvalidURL):
-            await send_error(ctx.webhook.send, 'Failed to download link: '
+        except aiohttp.InvalidURL:
+            await send_error(ctx.followup.send, 'Failed to download link: '
                              'Invalid URL')
             return
         except aiohttp.ClientError as exc:
-            await send_error(ctx.webhook.send,
+            await send_error(ctx.followup.send,
                              f'Failed to download link: {exc!s}')
             cleanup_failure(fn, root)
             return
-    MP3 = os.path.join(root, 'sound.mp3')
-    OPUS = os.path.join(root, 'sound.opus')
+    MP3 = root / 'sound.mp3'
+    OPUS = root / 'sound.opus'
     try:
         os.remove(MP3)
     except FileNotFoundError:
@@ -307,40 +333,46 @@ async def cmd(ctx: slash.Context, name: name_opt):
         if proc.returncode != 0:
             stderr = stderr.decode()
             stderr = stderr.rsplit('  lib', 1)[1].split('\n', 1)[1]
-            await send_error(ctx.webhook.send,
+            await send_error(ctx.followup.send,
                              'Failed to convert audio:\n'
                              '```\n%s\n```' % stderr)
             return
     finally:
         cleanup_failure(fn, root)
-    with open(os.path.join(root, 'sound.json'), 'w') as f:
+    with open(root / 'sound.json', 'w') as f:
         json.dump({'text': text, 'name': desc}, f)
     load_guild(ctx.guild.id)
-    await client.register_commands(ctx.guild.id)
-    await ctx.webhook.send(f'Successfully added/modified `/{name}`')
+    await client.tree.sync(guild=ctx.guild)
+    await ctx.followup.send(f'Successfully added/modified `/{name}`')
 
-@client.slash_cmd(name='-cmd')
-async def del_cmd(ctx: slash.Context, name: name_opt):
+@client.tree.command(name='-cmd')
+@app_commands.describe(name='The /name of the command (alphanumeric only).')
+async def del_cmd(ctx: discord.Interaction, name: str):
     """Remove a command, if it exists."""
-    root = os.path.join(guild_root(ctx.guild.id), name)
+    assert ctx.guild is not None
+    root = guild_root(ctx.guild.id) / name
     shutil.rmtree(root, True)
     load_guild(ctx.guild.id)
-    await client.register_commands(ctx.guild.id)
-    await ctx.respond(f'Removed `/{name}` if it exists')
+    await client.tree.sync(guild=ctx.guild)
+    await ctx.response.send_message(f'Removed `/{name}` if it exists')
 
-@cmd.check
-@del_cmd.check
-async def cmd_check(ctx: slash.Context):
-    if not ctx.author.guild_permissions.manage_guild:
-        await send_error(ctx.respond, 'You must have Manage Server '
+async def cmd_check(ctx: discord.Interaction):
+    assert isinstance(ctx.user, discord.Member)
+    if not ctx.user.guild_permissions.manage_guild:
+        await send_error(ctx.response.send_message,
+                         'You must have Manage Server '
                          'permissions to use this command.')
         return False
-    name = ctx.options['name'].casefold()
+    name = ctx.namespace.name.casefold()
     if not NAME_REGEX.match(name):
-        await send_error(ctx.respond, 'Command name must consist '
+        await send_error(ctx.response.send_message,
+                         'Command name must consist '
                          'only of 1-32 letters and numbers')
         return False
     return True
+
+cmd.add_check(cmd_check)
+del_cmd.add_check(cmd_check)
 
 async def wakeup():
     while 1:
@@ -357,11 +389,10 @@ if '-v' in sys.argv:
 
 try:
     load_guild(None)
-    for sid in os.listdir(os.path.join('sounds', '.guild')):
+    for sid in os.listdir(Path('sounds') / '.guild'):
         if not sid.isdigit():
             continue
         load_guild(int(sid))
-    client.loop.create_task(wakeup())
     client.run(CONFIG['token'])
 finally:
     sys.stdout.close()
