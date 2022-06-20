@@ -5,6 +5,7 @@ import shutil
 import json
 import re
 from typing import Dict, Optional, Tuple, Union
+import logging
 import traceback
 import asyncio
 import aiohttp
@@ -19,6 +20,19 @@ LEAVE_DELAY = 1
 NAME_REGEX = re.compile(r'^[a-z0-9]{1,32}$')
 os.chdir(SRCDIR)
 
+# logging config
+if len(sys.argv) <= 1 or sys.argv[1].startswith('-'):
+    log_handler = logging.StreamHandler(sys.stdout)
+else:
+    log_handler = logging.FileHandler(sys.argv[1], 'a')
+logging.basicConfig(format='{asctime} {levelname}\t {name:19} {message}',
+                    style='{', handlers=[log_handler], level=logging.INFO)
+logging.getLogger('discord').setLevel(logging.INFO)
+if '-v' in sys.argv:
+    logging.getLogger('discord.app_commands').setLevel(logging.DEBUG)
+logger = logging.getLogger('ButtonBot')
+logger.setLevel(logging.DEBUG)
+
 with open(CONFIG_FILE) as f:
     CONFIG = json.load(f)
 
@@ -30,8 +44,8 @@ async def send_error(method, msg):
     ))
 
 class ButtonTree(app_commands.CommandTree):
-    async def on_command_error(self, ctx: discord.Interaction,
-                               exc: Exception) -> None:
+    async def on_error(self, ctx: discord.Interaction,
+                       exc: app_commands.AppCommandError) -> None:
         if ctx.command:
             if ctx.command.on_error:
                 return # has its own handler
@@ -51,11 +65,10 @@ class ButtonTree(app_commands.CommandTree):
             commands.TooManyArguments,
         )):
             return
-        print('Ignoring exception in command {}:\n'.format(ctx.command)
-            + ''.join(traceback.format_exception(
-                type(exc), exc, exc.__traceback__
-            )), flush=True
-        )
+        logger.error('Ignoring exception in command %r:\n%s',
+                     ctx.command and ctx.command.name,
+                     ''.join(traceback.format_exception(
+                         type(exc), exc, exc.__traceback__)))
 
 class ButtonBot(commands.Bot):
     def __init__(self) -> None:
@@ -65,6 +78,7 @@ class ButtonBot(commands.Bot):
             intents=discord.Intents.default(),
             help_command=None,
             activity=discord.Activity(type=discord.ActivityType.watching, name='/'),
+            tree_cls=ButtonTree,
         )
 
     async def setup_hook(self) -> None:
@@ -76,15 +90,6 @@ class ButtonBot(commands.Bot):
             await self.tree.sync(guild=debug_guild)
 
 client = ButtonBot()
-
-try:
-    if sys.argv[1] != '-':
-        sys.stdout = sys.stderr = open(sys.argv[1], 'a')
-except IOError:
-    print(f"Couldn't open output file {sys.argv[1]!r}, quitting")
-    raise SystemExit(1) from None
-except IndexError:
-    pass # not specified, use stdout
 
 @client.tree.command()
 async def hello(ctx: discord.Interaction):
@@ -146,7 +151,8 @@ async def play_in_voice(
 ) -> None:
     """Play the sound in a voice channel."""
     if ctx.guild is None or not isinstance(ctx.command, app_commands.Command):
-        print('play_in_voice called from outside guild or command?')
+        logger.warning('play_in_voice called from outside guild or command? '
+                       'guild: %r, command: %r', ctx.guild, ctx.command)
         return
     lock = guild_locks.setdefault(ctx.guild.id, asyncio.Lock())
     locked = lock.locked()
@@ -229,7 +235,7 @@ def load_guild(guild_id: Optional[int]):
         with open(root / name / 'sound.json') as f:
             descname = json.load(f)['name']
         desc = f"Play a {descname} sound effect."
-        print('adding', name, guild_id, desc, flush=True)
+        logger.info('Adding /%s in guild %s: %r', name, guild_id, desc)
         make_cmd(name, desc, guild)
 
 ### DYNAMIC COMMANDS TECH END ###
@@ -382,17 +388,9 @@ async def wakeup():
             await client.close()
             return
 
-if '-v' in sys.argv:
-    import logging
-    logging.basicConfig()
-    logging.getLogger('discord.ext.slash').setLevel(logging.DEBUG)
-
-try:
-    load_guild(None)
-    for sid in os.listdir(Path('sounds') / '.guild'):
-        if not sid.isdigit():
-            continue
-        load_guild(int(sid))
-    client.run(CONFIG['token'])
-finally:
-    sys.stdout.close()
+load_guild(None)
+for sid in os.listdir(Path('sounds') / '.guild'):
+    if not sid.isdigit():
+        continue
+    load_guild(int(sid))
+client.run(CONFIG['token'], log_handler=None)
