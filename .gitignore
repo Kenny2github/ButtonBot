@@ -4,3 +4,4 @@ buttonbot.json
 __pycache__/
 sounds/.guild/*/
 *.log
+.venv
