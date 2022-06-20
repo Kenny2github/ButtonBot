@@ -62,8 +62,7 @@ class ButtonBot(commands.Bot):
         super().__init__(
             description='A bot that plays sound effects',
             command_prefix='/',
-            intents=discord.Intents.default()
-            | discord.Intents(message_content=True),
+            intents=discord.Intents.default(),
             help_command=None,
             activity=discord.Activity(type=discord.ActivityType.watching, name='/'),
         )
@@ -235,14 +234,6 @@ def load_guild(guild_id: Optional[int]):
 
 ### DYNAMIC COMMANDS TECH END ###
 
-async def msg_input(ctx: discord.Interaction, prompt: str) -> discord.Message:
-    await ctx.response.send_message(prompt)
-    msg = await client.wait_for('message', timeout=60.0, check=lambda m: (
-        m.channel.id == ctx.channel_id
-        and m.author.id == ctx.user.id
-    ))
-    return msg
-
 def cleanup_failure(fn: Path, root: Path):
     # remove the tmp file if it exists
     try:
@@ -256,65 +247,73 @@ def cleanup_failure(fn: Path, root: Path):
         pass
 
 @client.tree.command()
-@app_commands.describe(name='The /name of the command (alphanumeric only).')
-async def cmd(ctx: discord.Interaction, name: str):
+@app_commands.describe(
+    name='The /name of the command (alphanumeric only).',
+    text='The exact text to use as the command text.',
+    description='The name of the sound effect ("Play a <desc> sound effect").',
+    file='Upload the ffmpeg-compatible sound file to play.',
+    link='The link to the ffmpeg-compatible sound file to play.',
+)
+@app_commands.guild_only
+async def cmd(ctx: discord.Interaction, name: str,
+              text: str, description: str,
+              file: Optional[discord.Attachment] = None,
+              link: Optional[str] = None) -> None:
     """Create a new guild command."""
     assert ctx.guild is not None
-    try:
-        text = await msg_input(ctx, 'Send the **exact text** '
-                               'to use as the command text. (Send "cancel" '
-                               'three times to cancel this addition.)')
-        desc = await msg_input(ctx, 'Send the name of the sound effect '
-                               '(goes in the command description).')
-        audf = await msg_input(ctx, 'Send a link to, or upload, '
-                               'the ffmpeg-compatible sound file.')
-    except asyncio.TimeoutError:
-        await send_error(ctx.followup.send, 'Timed out waiting for message.')
+    if (file is None and link is None) \
+            or (file is not None and link is not None):
+        await send_error(ctx.response.send_message,
+                         'Exactly one of `file` or `link` '
+                         'should be specified.')
         return
-    text = text.content
-    desc = desc.content
+    await ctx.response.defer()
+    text = text
     root = guild_root(ctx.guild.id) / name
     os.makedirs(root, exist_ok=True)
-    if audf.attachments:
-        audf = audf.attachments[0]
+    if file is not None:
         try:
-            fn = 'tmp.' + audf.filename.rsplit('.', 1)[1]
+            fn = 'tmp.' + file.filename.rsplit('.', 1)[1]
             fn = root / fn
         except IndexError:
-            await send_error(ctx.followup.send, 'Failed to download attachment'
-                             ': Does not seem to be ffmpeg-compatible')
+            await send_error(ctx.edit_original_message,
+                             'Failed to download attachment: '
+                             'Does not seem to be ffmpeg-compatible')
             return
         try:
-            await audf.save(fn)
+            await file.save(fn)
         except discord.HTTPException as exc:
-            await send_error(ctx.followup.send, 'Failed to download attachment'
-                             f': {exc!s}')
+            await send_error(ctx.edit_original_message,
+                             'Failed to download attachment: '
+                             f'{exc!s}')
             return
-    else:
+    elif link is not None:
         try:
-            fn = 'tmp.' + audf.content.strip().rsplit('.', 1)[1]
+            fn = 'tmp.' + link.strip().rsplit('.', 1)[1]
             fn = root / fn
         except IndexError:
-            await send_error(ctx.followup.send, 'Failed to download link: '
-                             'Invalid URL')
+            await send_error(ctx.edit_original_message,
+                             'Failed to download link: Invalid URL')
             return
         try:
             async with aiohttp.ClientSession() as sesh:
-                async with sesh.get(audf.content.strip()) as resp:
+                async with sesh.get(link.strip()) as resp:
                     resp.raise_for_status()
                     CHUNK = 1024*1024
                     with open(fn, 'wb') as f:
                         while chunk := await resp.content.read(CHUNK):
                             f.write(chunk)
         except aiohttp.InvalidURL:
-            await send_error(ctx.followup.send, 'Failed to download link: '
-                             'Invalid URL')
+            await send_error(ctx.edit_original_message,
+                             'Failed to download link: Invalid URL')
             return
         except aiohttp.ClientError as exc:
-            await send_error(ctx.followup.send,
+            await send_error(ctx.edit_original_message,
                              f'Failed to download link: {exc!s}')
             cleanup_failure(fn, root)
             return
+    else:
+        raise RuntimeError('Logical impossibility')
     MP3 = root / 'sound.mp3'
     OPUS = root / 'sound.opus'
     try:
@@ -333,20 +332,21 @@ async def cmd(ctx: discord.Interaction, name: str):
         if proc.returncode != 0:
             stderr = stderr.decode()
             stderr = stderr.rsplit('  lib', 1)[1].split('\n', 1)[1]
-            await send_error(ctx.followup.send,
+            await send_error(ctx.edit_original_message,
                              'Failed to convert audio:\n'
                              '```\n%s\n```' % stderr)
             return
     finally:
         cleanup_failure(fn, root)
     with open(root / 'sound.json', 'w') as f:
-        json.dump({'text': text, 'name': desc}, f)
+        json.dump({'text': text, 'name': description}, f)
     load_guild(ctx.guild.id)
     await client.tree.sync(guild=ctx.guild)
-    await ctx.followup.send(f'Successfully added/modified `/{name}`')
+    await ctx.edit_original_message(content=f'Successfully added/modified `/{name}`')
 
 @client.tree.command(name='-cmd')
 @app_commands.describe(name='The /name of the command (alphanumeric only).')
+@app_commands.guild_only
 async def del_cmd(ctx: discord.Interaction, name: str):
     """Remove a command, if it exists."""
     assert ctx.guild is not None
