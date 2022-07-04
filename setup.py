@@ -28,7 +28,7 @@ setup(
         'Programming Language :: Python :: 3.7'
     ],
     keywords='discord bot bruh nut sound effects',
-    py_modules='main.py',
+    py_modules=['main'],
     install_requires=reqs,
     python_requires='>=3.7',
 )

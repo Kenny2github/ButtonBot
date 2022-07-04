@@ -8,6 +8,7 @@ from typing import Dict, Optional, Tuple, Union
 import logging
 import traceback
 import asyncio
+from urllib.parse import urlparse
 import aiohttp
 import discord
 from discord import app_commands
@@ -252,13 +253,93 @@ def cleanup_failure(fn: Path, root: Path):
     except OSError:
         pass
 
+async def try_save_file(ctx: discord.Interaction, root: Path,
+                        file: discord.Attachment) -> Optional[Path]:
+    try:
+        fn = 'tmp.' + file.filename.rsplit('.', 1)[1]
+        fn = root / fn
+        logger.debug('Saving file %s to %s', file.filename, fn)
+    except IndexError:
+        logger.debug('Filename %s invalid for saving', file.filename)
+        await send_error(ctx.edit_original_message,
+                         'Failed to download attachment: '
+                         'Does not seem to be ffmpeg-compatible')
+        return None
+    try:
+        await file.save(fn)
+    except discord.HTTPException as exc:
+        logger.exception('Failed to download attachment:')
+        await send_error(ctx.edit_original_message,
+                         f'Failed to download attachment: {exc!s}')
+        return None
+    return fn
+
+async def try_save_url(ctx: discord.Interaction,
+                       root: Path, link: str) -> Optional[Path]:
+    try:
+        urlpath = urlparse(link.strip()).path # includes leading slash
+        fn = 'tmp.' + urlpath.rsplit('/', 1)[1].rsplit('.', 1)[1]
+        fn = root / fn
+        logger.debug('Saving filename link %s to %s', link, fn)
+    except IndexError:
+        logger.debug('Link invalid as filename, trying youtube-dl: %s', link)
+        raise # indicates to retry as youtube-dl url
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(link.strip()) as response:
+                response.raise_for_status()
+                CHUNK = 1024*1024
+                with open(fn, 'wb') as f:
+                    while chunk := await response.content.read(CHUNK):
+                        f.write(chunk)
+    except aiohttp.InvalidURL:
+        await send_error(ctx.edit_original_message,
+                         'Failed to download link: Invalid URL')
+        return None
+    except aiohttp.ClientError as exc:
+        logger.exception('Failed to download %s:', link)
+        await send_error(ctx.edit_original_message,
+                         f'Failed to download link: {exc!s}')
+        cleanup_failure(fn, root)
+        return None
+    return fn
+
+async def try_save_ytd(ctx: discord.Interaction,
+                       root: Path, link: str) -> Optional[Path]:
+    fn = root / 'sound.m4a'
+    logger.debug('Saving youtube-dl link %s to %s', link, fn)
+    try:
+        cmd = ['youtube-dl', link.strip(), '-f', 'm4a', '-o', fn]
+        logger.debug('Executing: %s', cmd)
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT)
+        stdout, _ = await proc.communicate()
+        stdout = stdout.decode()
+        logger.debug('youtube-dl subprocess exited; output:\n%s', stdout)
+        if proc.returncode != 0:
+            await send_error(ctx.edit_original_message,
+                             'Failed to download link:\n'
+                             f'```\n{stdout}\n```')
+            cleanup_failure(fn, root)
+            return None
+    except Exception as exc:
+        logger.exception('Failed to youtube-dl link:')
+        await send_error(ctx.edit_original_message,
+                         f'Failed to download link: {exc!s}')
+        cleanup_failure(fn, root)
+        return None
+    return fn
+
 @client.tree.command()
 @app_commands.describe(
     name='The /name of the command (alphanumeric only).',
     text='The exact text to use as the command text.',
     description='The name of the sound effect ("Play a <desc> sound effect").',
-    file='Upload the ffmpeg-compatible sound file to play.',
-    link='The link to the ffmpeg-compatible sound file to play.',
+    file='Upload the ffmpeg-compatible sound-containing file to play.',
+    link='Link to the ffmpeg- (incl. file extension) or youtube-dl-'
+    'compatible sound-containing file to play.',
 )
 @app_commands.guild_only
 async def cmd(ctx: discord.Interaction, name: str,
@@ -267,8 +348,7 @@ async def cmd(ctx: discord.Interaction, name: str,
               link: Optional[str] = None) -> None:
     """Create a new guild command."""
     assert ctx.guild is not None
-    if (file is None and link is None) \
-            or (file is not None and link is not None):
+    if (file is None) == (link is None):
         await send_error(ctx.response.send_message,
                          'Exactly one of `file` or `link` '
                          'should be specified.')
@@ -278,48 +358,19 @@ async def cmd(ctx: discord.Interaction, name: str,
     root = guild_root(ctx.guild.id) / name
     os.makedirs(root, exist_ok=True)
     if file is not None:
-        try:
-            fn = 'tmp.' + file.filename.rsplit('.', 1)[1]
-            fn = root / fn
-        except IndexError:
-            await send_error(ctx.edit_original_message,
-                             'Failed to download attachment: '
-                             'Does not seem to be ffmpeg-compatible')
-            return
-        try:
-            await file.save(fn)
-        except discord.HTTPException as exc:
-            await send_error(ctx.edit_original_message,
-                             'Failed to download attachment: '
-                             f'{exc!s}')
-            return
+        fn = await try_save_file(ctx, root, file)
+        if fn is None:
+            return # error already reported
     elif link is not None:
         try:
-            fn = 'tmp.' + link.strip().rsplit('.', 1)[1]
-            fn = root / fn
-        except IndexError:
-            await send_error(ctx.edit_original_message,
-                             'Failed to download link: Invalid URL')
-            return
-        try:
-            async with aiohttp.ClientSession() as sesh:
-                async with sesh.get(link.strip()) as resp:
-                    resp.raise_for_status()
-                    CHUNK = 1024*1024
-                    with open(fn, 'wb') as f:
-                        while chunk := await resp.content.read(CHUNK):
-                            f.write(chunk)
-        except aiohttp.InvalidURL:
-            await send_error(ctx.edit_original_message,
-                             'Failed to download link: Invalid URL')
-            return
-        except aiohttp.ClientError as exc:
-            await send_error(ctx.edit_original_message,
-                             f'Failed to download link: {exc!s}')
-            cleanup_failure(fn, root)
-            return
+            fn = await try_save_url(ctx, root, link)
+        except IndexError: # link without file extension, maybe ytd-able?
+            fn = await try_save_ytd(ctx, root, link)
+        if fn is None:
+            return # error already reported
     else:
         raise RuntimeError('Logical impossibility')
+    logger.debug('Saved argument to %s', fn)
     MP3 = root / 'sound.mp3'
     OPUS = root / 'sound.opus'
     try:
@@ -331,16 +382,20 @@ async def cmd(ctx: discord.Interaction, name: str,
     except FileNotFoundError:
         pass
     try:
+        cmd = ['ffmpeg', '-i', fn, MP3, OPUS]
+        logger.debug('Executing: %s', cmd)
         proc = await asyncio.create_subprocess_exec(
-            'ffmpeg', '-i', fn, MP3, OPUS,
-            stderr=asyncio.subprocess.PIPE)
-        _, stderr = await proc.communicate()
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT)
+        stdout, _ = await proc.communicate()
+        stdout = stdout.decode()
+        logger.debug('ffmpeg subprocess exited; output:\n%s', stdout)
         if proc.returncode != 0:
-            stderr = stderr.decode()
-            stderr = stderr.rsplit('  lib', 1)[1].split('\n', 1)[1]
+            stdout = stdout.rsplit('  lib', 1)[1].split('\n', 1)[1]
             await send_error(ctx.edit_original_message,
                              'Failed to convert audio:\n'
-                             '```\n%s\n```' % stderr)
+                             f'```\n{stdout}\n```')
             return
     finally:
         cleanup_failure(fn, root)
