@@ -88,7 +88,9 @@ class ButtonBot(commands.Bot):
         if debug_guild_id:
             debug_guild = discord.Object(debug_guild_id)
             self.tree.copy_global_to(guild=debug_guild)
-            await self.tree.sync(guild=debug_guild)
+        else:
+            debug_guild = None
+        await self.tree.sync(guild=debug_guild)
 
 client = ButtonBot()
 
