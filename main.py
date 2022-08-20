@@ -164,7 +164,7 @@ async def play_in_voice(
     async with lock:
         text, source = sound_source(name, guild.id if guild else None)
         if locked: # i.e. was deferred
-            asyncio.create_task(ctx.edit_original_message(content=text))
+            asyncio.create_task(ctx.edit_original_response(content=text))
         else:
             asyncio.create_task(ctx.response.send_message(text, ephemeral=True))
         # if things error past here, we've already sent the message
@@ -263,7 +263,7 @@ async def try_save_file(ctx: discord.Interaction, root: Path,
         logger.debug('Saving file %s to %s', file.filename, fn)
     except IndexError:
         logger.debug('Filename %s invalid for saving', file.filename)
-        await send_error(ctx.edit_original_message,
+        await send_error(ctx.edit_original_response,
                          'Failed to download attachment: '
                          'Does not seem to be ffmpeg-compatible')
         return None
@@ -271,7 +271,7 @@ async def try_save_file(ctx: discord.Interaction, root: Path,
         await file.save(fn)
     except discord.HTTPException as exc:
         logger.exception('Failed to download attachment:')
-        await send_error(ctx.edit_original_message,
+        await send_error(ctx.edit_original_response,
                          f'Failed to download attachment: {exc!s}')
         return None
     return fn
@@ -295,12 +295,12 @@ async def try_save_url(ctx: discord.Interaction,
                     while chunk := await response.content.read(CHUNK):
                         f.write(chunk)
     except aiohttp.InvalidURL:
-        await send_error(ctx.edit_original_message,
+        await send_error(ctx.edit_original_response,
                          'Failed to download link: Invalid URL')
         return None
     except aiohttp.ClientError as exc:
         logger.exception('Failed to download %s:', link)
-        await send_error(ctx.edit_original_message,
+        await send_error(ctx.edit_original_response,
                          f'Failed to download link: {exc!s}')
         cleanup_failure(fn, root)
         return None
@@ -321,14 +321,14 @@ async def try_save_ytd(ctx: discord.Interaction,
         stdout = stdout.decode()
         logger.debug('youtube-dl subprocess exited; output:\n%s', stdout)
         if proc.returncode != 0:
-            await send_error(ctx.edit_original_message,
+            await send_error(ctx.edit_original_response,
                              'Failed to download link:\n'
                              f'```\n{stdout}\n```')
             cleanup_failure(fn, root)
             return None
     except Exception as exc:
         logger.exception('Failed to youtube-dl link:')
-        await send_error(ctx.edit_original_message,
+        await send_error(ctx.edit_original_response,
                          f'Failed to download link: {exc!s}')
         cleanup_failure(fn, root)
         return None
@@ -395,7 +395,7 @@ async def cmd(ctx: discord.Interaction, name: str,
         logger.debug('ffmpeg subprocess exited; output:\n%s', stdout)
         if proc.returncode != 0:
             stdout = stdout.rsplit('  lib', 1)[1].split('\n', 1)[1]
-            await send_error(ctx.edit_original_message,
+            await send_error(ctx.edit_original_response,
                              'Failed to convert audio:\n'
                              f'```\n{stdout}\n```')
             return
@@ -405,7 +405,7 @@ async def cmd(ctx: discord.Interaction, name: str,
         json.dump({'text': text, 'name': description}, f)
     load_guild(ctx.guild.id)
     await client.tree.sync(guild=ctx.guild)
-    await ctx.edit_original_message(content=f'Successfully added/modified `/{name}`')
+    await ctx.edit_original_response(content=f'Successfully added/modified `/{name}`')
 
 @client.tree.command(name='-cmd')
 @app_commands.describe(name='The /name of the command (alphanumeric only).')
