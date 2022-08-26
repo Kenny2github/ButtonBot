@@ -158,15 +158,9 @@ async def play_in_voice(
                        'guild: %r, command: %r', ctx.guild, ctx.command)
         return
     lock = guild_locks.setdefault(ctx.guild.id, asyncio.Lock())
-    locked = lock.locked()
-    if locked:
-        await ctx.response.defer(ephemeral=True)
     async with lock:
         text, source = sound_source(name, guild.id if guild else None)
-        if locked: # i.e. was deferred
-            asyncio.create_task(ctx.edit_original_response(content=text))
-        else:
-            asyncio.create_task(ctx.response.send_message(text, ephemeral=True))
+        asyncio.create_task(ctx.edit_original_response(content=text))
         # if things error past here, we've already sent the message
         vc: Optional[discord.VoiceClient] \
             = ctx.guild.voice_client # type: ignore # not customized
@@ -198,6 +192,7 @@ async def execute(ctx: discord.Interaction, chat: bool, name: str,
         and isinstance(ctx.command, app_commands.Command)
     if ctx.user.voice is not None and ctx.user.voice.channel \
             is not None and not chat:
+        await ctx.response.defer(ephemeral=True)
         try:
             await play_in_voice(ctx, name, ctx.user.voice.channel, guild)
         except (discord.HTTPException, asyncio.TimeoutError):
@@ -205,9 +200,10 @@ async def execute(ctx: discord.Interaction, chat: bool, name: str,
         else:
             return # success, stop here
     else:
+        await ctx.response.defer()
         text, fn = sound(name, guild.id if guild else None)
         f = discord.File(fn, filename=name + '.mp3')
-        await ctx.response.send_message(text, file=f)
+        await ctx.edit_original_response(content=text, attachments=[f])
 
 def make_cmd(name: str, desc: str,
              guild: Optional[discord.abc.Snowflake]) -> None:
