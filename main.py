@@ -330,28 +330,13 @@ async def try_save_ytd(ctx: discord.Interaction,
         return None
     return fn
 
-@client.tree.command()
-@app_commands.describe(
-    name='The /name of the command (alphanumeric only).',
-    text='The exact text to use as the command text.',
-    description='The name of the sound effect ("Play a <desc> sound effect").',
-    file='Upload the ffmpeg-compatible sound-containing file to play.',
-    link='Link to the ffmpeg- (incl. file extension) or youtube-dl-'
-    'compatible sound-containing file to play.',
-)
-@app_commands.guild_only
-async def cmd(ctx: discord.Interaction, name: str,
-              text: str, description: str,
-              file: Optional[discord.Attachment] = None,
-              link: Optional[str] = None) -> None:
+async def create_cmd(ctx: discord.Interaction, name: str,
+                     text: str, description: str,
+                     file: Optional[discord.Attachment] = None,
+                     link: Optional[str] = None) -> None:
     """Create a new guild command."""
     assert ctx.guild is not None
-    if (file is None) == (link is None):
-        await send_error(ctx.response.send_message,
-                         'Exactly one of `file` or `link` '
-                         'should be specified.')
-        return
-    await ctx.response.defer()
+    await ctx.response.defer(thinking=True)
     text = text
     root = guild_root(ctx.guild.id) / name
     os.makedirs(root, exist_ok=True)
@@ -403,6 +388,60 @@ async def cmd(ctx: discord.Interaction, name: str,
     await client.tree.sync(guild=ctx.guild)
     await ctx.edit_original_response(content=f'Successfully added/modified `/{name}`')
 
+class CommandTextModal(discord.ui.Modal):
+
+    name = discord.ui.TextInput(
+        label='Command Name',
+        placeholder='The /name of the command (alphanumeric only).',
+        required=True,
+    )
+    text = discord.ui.TextInput(
+        label='Command Text',
+        placeholder='The exact text to use as the command text.',
+        required=True,
+        style=discord.TextStyle.paragraph,
+    )
+    description = discord.ui.TextInput(
+        label='Command Description',
+        placeholder='The name of the sound effect ("Play a <desc> sound effect").',
+        required=True,
+    )
+    link: Optional[discord.ui.TextInput] = None
+    file: Optional[discord.Attachment] = None
+
+    def __init__(self, file: Optional[discord.Attachment] = None) -> None:
+        super().__init__(title='Command Details')
+        if file is None:
+            self.link = discord.ui.TextInput(
+                label='Link to Sound',
+                placeholder='Link to the ffmpeg- (incl. file extension) or '
+                'youtube-dl-compatible sound-containing file to play.',
+                required=True,
+                style=discord.TextStyle.paragraph,
+            )
+            self.add_item(self.link)
+        else:
+            self.file = file
+
+    async def interaction_check(self, ctx: discord.Interaction) -> bool:
+        return await cmd_name_check(ctx, self.name.value)
+
+    async def on_submit(self, ctx: discord.Interaction) -> None:
+        await create_cmd(ctx, self.name.value, self.text.value,
+                         self.description.value, self.file,
+                         None if self.link is None else self.link.value)
+
+@client.tree.command()
+@app_commands.describe(
+    file='Upload the ffmpeg-compatible sound-containing file to play '
+    '(instead of linking to it).',
+)
+@app_commands.guild_only
+async def cmd(ctx: discord.Interaction,
+              file: Optional[discord.Attachment] = None) -> None:
+    """Create a new guild command."""
+    await ctx.response.send_modal(CommandTextModal(file))
+
 @client.tree.command(name='-cmd')
 @app_commands.describe(name='The /name of the command (alphanumeric only).')
 @app_commands.guild_only
@@ -415,14 +454,19 @@ async def del_cmd(ctx: discord.Interaction, name: str):
     await client.tree.sync(guild=ctx.guild)
     await ctx.response.send_message(f'Removed `/{name}` if it exists')
 
-async def cmd_check(ctx: discord.Interaction):
+async def cmd_check(ctx: discord.Interaction) -> bool:
     assert isinstance(ctx.user, discord.Member)
     if not ctx.user.guild_permissions.manage_guild:
         await send_error(ctx.response.send_message,
                          'You must have Manage Server '
                          'permissions to use this command.')
         return False
-    name = ctx.namespace.name.casefold()
+    return True
+
+async def del_check(ctx: discord.Interaction) -> bool:
+    return await cmd_name_check(ctx, ctx.namespace.name.casefold())
+
+async def cmd_name_check(ctx: discord.Interaction, name: str) -> bool:
     if not NAME_REGEX.match(name):
         await send_error(ctx.response.send_message,
                          'Command name must consist '
@@ -432,6 +476,7 @@ async def cmd_check(ctx: discord.Interaction):
 
 cmd.add_check(cmd_check)
 del_cmd.add_check(cmd_check)
+del_cmd.add_check(del_check)
 
 async def wakeup():
     while 1:
