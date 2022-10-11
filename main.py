@@ -150,6 +150,7 @@ CREATE TABLE IF NOT EXISTS guild_stats (
 CREATE INDEX IF NOT EXISTS guild_guilds ON guild_stats(guild_id);
 """)
         try:
+            logged_count = 0
             while 1:
                 ctx = await self.log_queue.get()
                 if not ctx.command:
@@ -157,7 +158,7 @@ CREATE INDEX IF NOT EXISTS guild_guilds ON guild_stats(guild_id);
                 if not isinstance(ctx.command, app_commands.Command):
                     continue # ...what?
                 if ctx.command.qualified_name in {
-                    'hello', 'invite', 'version', 'stats',
+                    'hello', 'invite', 'version', 'stats', 'cmd', '-cmd'
                 }:
                     continue # don't record stats for meta-commands
                 command_guild = cmd_guild_id(ctx)
@@ -173,6 +174,12 @@ CREATE INDEX IF NOT EXISTS guild_guilds ON guild_stats(guild_id);
                         'VALUES (?, ?) ON CONFLICT(cmd_name, used_in_guild_id) '
                         'DO UPDATE SET usage_count = usage_count + 1;',
                         (ctx.command.qualified_name, ctx.guild_id))
+                logged_count += 1
+                if logged_count >= CONFIG['commit_threshold']:
+                    logger.debug('Logged %s usages, committing stats',
+                                 logged_count)
+                    await dbw.commit()
+                    logged_count = 0
         except KeyboardInterrupt:
             logger.info('Goodbye.')
         finally:
