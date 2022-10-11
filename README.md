@@ -1,5 +1,4 @@
-ButtonBot
-=========
+# ButtonBot
 
 A Bruh/NUT/etc-button bot. Using ``/bruh`` as an example, running the command:
 
@@ -7,8 +6,7 @@ A Bruh/NUT/etc-button bot. Using ``/bruh`` as an example, running the command:
 - Otherwise, it uploads the effect's audio file.
 - Before doing either, it just says "Bruh."
 
-Adding Sound Effects
---------------------
+## Adding Sound Effects
 
 See the ``README.md`` in ``sounds/`` for adding global commands.
 
