@@ -1,3 +1,4 @@
+from __future__ import annotations
 import sys
 import os
 from pathlib import Path
@@ -45,6 +46,9 @@ async def send_error(method, msg):
     ))
 
 class ButtonTree(app_commands.CommandTree):
+
+    client: ButtonBot
+
     async def on_error(self, ctx: discord.Interaction,
                        exc: app_commands.AppCommandError) -> None:
         if ctx.command:
