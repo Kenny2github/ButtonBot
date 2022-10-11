@@ -214,10 +214,11 @@ def make_cmd(name: str, desc: str,
     @client.tree.command(name=name, description=desc, guild=guild)
     @app_commands.describe(
         chat="If True, sends the sound in chat even if you're in voice.")
-    @app_commands.guild_only
     async def __cmd(ctx: discord.Interaction, chat: bool = False):
         """Closure for /(name)"""
         await execute(ctx, chat, name, guild)
+    if guild is not None:
+        app_commands.guild_only(__cmd)
 
 def load_guild(guild_id: Optional[int]):
     if guild_id:
