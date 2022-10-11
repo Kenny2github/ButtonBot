@@ -206,7 +206,7 @@ async def version(ctx: discord.Interaction):
 
 def mask(data: str, reveal_last_n: int = 0) -> str:
     mask_n = len(data) - reveal_last_n
-    return '*' * (mask_n) + data[mask_n:]
+    return r'\*' * (mask_n) + data[mask_n:]
 
 @client.tree.command()
 @app_commands.describe(
@@ -230,7 +230,7 @@ async def stats(ctx: discord.Interaction, command: Optional[str] = None):
             def reveal_if_us(guild_id: int) -> str:
                 if ctx.guild is not None and guild_id == ctx.guild.id:
                     return ctx.guild.name
-                return mask(str(guild_id))
+                return mask(str(guild_id), 4)
             lines = [f'{reveal_if_us(guild_id)}: {count} uses'
                     for guild_id, count in guild_data.items()]
             lines.append(f'Total: {sum(guild_data.values())} uses')
