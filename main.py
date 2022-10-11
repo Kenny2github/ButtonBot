@@ -52,6 +52,8 @@ async def send_error(method, msg):
 def cmd_guild_id(ctx: discord.Interaction) -> Optional[int]:
     if not isinstance(ctx.command, app_commands.Command):
         return None
+    if 'guild_id' in ctx.command.extras:
+        return ctx.command.extras['guild_id']
     if ctx.command.guild_only:
         return ctx.guild_id
     return None
@@ -371,14 +373,14 @@ async def execute(ctx: discord.Interaction, chat: bool, name: str,
 
 def make_cmd(name: str, desc: str,
              guild: Optional[discord.abc.Snowflake]) -> None:
-    @client.tree.command(name=name, description=desc, guild=guild)
+    @client.tree.command(name=name, description=desc, guild=guild,
+                         extras={'guild_id': guild.id if guild else None})
     @app_commands.describe(
         chat="If True, sends the sound in chat even if you're in voice.")
+    @app_commands.guild_only
     async def __cmd(ctx: discord.Interaction, chat: bool = False):
         """Closure for /(name)"""
         await execute(ctx, chat, name, guild)
-    if guild is not None:
-        app_commands.guild_only(__cmd)
 
 def load_guild(guild_id: Optional[int]):
     if guild_id:
