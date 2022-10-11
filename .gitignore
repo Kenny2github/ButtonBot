@@ -5,3 +5,4 @@ __pycache__/
 sounds/.guild/*/
 *.log
 .venv
+*.db*

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from functools import cache
 import sys
 import os
 from pathlib import Path
@@ -11,6 +12,7 @@ import traceback
 import asyncio
 from urllib.parse import urlparse
 import aiohttp
+import aiosqlite
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -18,6 +20,7 @@ from discord.ext import commands
 SRCDIR = Path(__file__).resolve().parent
 VERSION = None
 CONFIG_FILE = 'buttonbot.json'
+STATS_FILE = 'buttonbot_stats.db'
 LEAVE_DELAY = 1
 NAME_REGEX = re.compile(r'^[a-z0-9]{1,32}$')
 os.chdir(SRCDIR)
@@ -44,6 +47,14 @@ async def send_error(method, msg):
         description=msg,
         color=0xff0000
     ))
+
+@cache
+def cmd_guild_id(ctx: discord.Interaction) -> Optional[int]:
+    if not isinstance(ctx.command, app_commands.Command):
+        return None
+    if ctx.command.guild_only:
+        return ctx.guild_id
+    return None
 
 class ButtonTree(app_commands.CommandTree):
 
@@ -75,7 +86,23 @@ class ButtonTree(app_commands.CommandTree):
                      ''.join(traceback.format_exception(
                          type(exc), exc, exc.__traceback__)))
 
+    async def interaction_check(self, ctx: discord.Interaction) -> bool:
+        if not isinstance(ctx.command, app_commands.Command):
+            return False # we shouldn't have anything other than these
+        logger.info('User %s\t(%18d) in channel %s\t(%18d) '
+                    'running /%s (belongs to guild %s)',
+                    ctx.user, ctx.user.id, ctx.channel,
+                    ctx.channel.id if ctx.channel else '(none)',
+                    ctx.command.qualified_name,
+                    cmd_guild_id(ctx))
+        self.client.log_queue.put_nowait(ctx)
+        return True
+
 class ButtonBot(commands.Bot):
+
+    log_queue: asyncio.Queue[discord.Interaction]
+    db: aiosqlite.Cursor
+
     def __init__(self) -> None:
         super().__init__(
             description='A bot that plays sound effects',
@@ -87,7 +114,8 @@ class ButtonBot(commands.Bot):
         )
 
     async def setup_hook(self) -> None:
-        asyncio.create_task(wakeup())
+        self.log_queue = asyncio.Queue()
+
         debug_guild_id = CONFIG.get('guild_id', None)
         if debug_guild_id:
             debug_guild = discord.Object(debug_guild_id)
@@ -95,6 +123,60 @@ class ButtonBot(commands.Bot):
         else:
             debug_guild = None
         await self.tree.sync(guild=debug_guild)
+
+        asyncio.create_task(self.save_stats())
+
+    async def save_stats(self) -> None:
+        dbw = await aiosqlite.connect(STATS_FILE)
+        dbw.row_factory = aiosqlite.Row
+        self.db = await dbw.cursor()
+        await self.db.executescript("""
+CREATE TABLE IF NOT EXISTS global_stats (
+    cmd_name TEXT NOT NULL,
+    used_in_guild_id INTEGER NOT NULL,
+    usage_count INTEGER DEFAULT 1,
+    PRIMARY KEY(cmd_name, used_in_guild_id)
+);
+CREATE INDEX IF NOT EXISTS global_cmds ON global_stats(cmd_name);
+CREATE INDEX IF NOT EXISTS global_guilds ON global_stats(used_in_guild_id);
+CREATE TABLE IF NOT EXISTS guild_stats (
+    cmd_name TEXT NOT NULL,
+    guild_id INTEGER NOT NULL,
+    usage_count INTEGER DEFAULT 1,
+    PRIMARY KEY(cmd_name, guild_id)
+);
+CREATE INDEX IF NOT EXISTS guild_guilds ON guild_stats(guild_id);
+""")
+        try:
+            while 1:
+                ctx = await self.log_queue.get()
+                if not ctx.command:
+                    continue # ignore non-command interactions
+                if not isinstance(ctx.command, app_commands.Command):
+                    continue # ...what?
+                if ctx.command.qualified_name in {
+                    'hello', 'invite', 'version', 'stats',
+                }:
+                    continue # don't record stats for meta-commands
+                command_guild = cmd_guild_id(ctx)
+                if command_guild: # guild-specific command
+                    await self.db.execute(
+                        'INSERT INTO guild_stats(cmd_name, guild_id) '
+                        'VALUES (?, ?) ON CONFLICT(cmd_name, guild_id) '
+                        'DO UPDATE SET usage_count = usage_count + 1;',
+                        (ctx.command.qualified_name, command_guild))
+                else:
+                    await self.db.execute(
+                        'INSERT INTO global_stats(cmd_name, used_in_guild_id) '
+                        'VALUES (?, ?) ON CONFLICT(cmd_name, used_in_guild_id) '
+                        'DO UPDATE SET usage_count = usage_count + 1;',
+                        (ctx.command.qualified_name, ctx.guild_id))
+        except KeyboardInterrupt:
+            logger.info('Goodbye.')
+        finally:
+            await dbw.commit()
+            await dbw.close()
+            await self.close()
 
 client = ButtonBot()
 
@@ -119,6 +201,84 @@ async def version(ctx: discord.Interaction):
     stdout, _ = await proc.communicate()
     VERSION = stdout.decode('ascii').strip()
     await ctx.response.send_message(f'`{VERSION}`', ephemeral=True)
+
+def mask(data: str, reveal_last_n: int = 0) -> str:
+    mask_n = len(data) - reveal_last_n
+    return '*' * (mask_n) + data[mask_n:]
+
+@client.tree.command()
+@app_commands.describe(
+    command="If specified, only get stats for this command.")
+async def stats(ctx: discord.Interaction, command: Optional[str] = None):
+    """Get stats for command usage."""
+    await ctx.response.defer()
+    if ctx.guild is not None:
+        guild_name = discord.utils.escape_markdown(ctx.guild.name)
+    else:
+        guild_name = None
+    embeds: list[discord.Embed] = []
+    if command:
+        # global stats
+        query = 'SELECT used_in_guild_id, usage_count '\
+            'FROM global_stats WHERE cmd_name=?'
+        guild_data: dict[int, int] = {
+            row[0]: row[1] async for row in
+            await client.db.execute(query, (command,))}
+        if guild_data:
+            def reveal_if_us(guild_id: int) -> str:
+                if ctx.guild is not None and guild_id == ctx.guild.id:
+                    return ctx.guild.name
+                return mask(str(guild_id))
+            lines = [f'{reveal_if_us(guild_id)}: {count} uses'
+                    for guild_id, count in guild_data.items()]
+            lines.append(f'Total: {sum(guild_data.values())} uses')
+            embeds.append(discord.Embed(
+                title=f'Stats for global command `/{command}`',
+                description='\n'.join(lines),
+                color=discord.Color.yellow()))
+        # guild stats
+        if ctx.guild is not None:
+            query = 'SELECT usage_count FROM guild_stats ' \
+                'WHERE cmd_name=? AND guild_id=?'
+            await client.db.execute(query, (command, ctx.guild.id))
+            row = await client.db.fetchone()
+            if row:
+                embeds.append(discord.Embed(
+                    title=f'Stats for `/{command}` in {guild_name}',
+                    description=f'{row[0]} uses',
+                    color=discord.Color.blue()))
+        if not embeds:
+            embeds.append(discord.Embed(
+                title='404 Not Found',
+                description=f'No stats found for any command named `/{command}`',
+                color=discord.Color.red()))
+    else:
+        # global stats
+        query = 'SELECT cmd_name, SUM(usage_count) ' \
+            'FROM global_stats GROUP BY cmd_name'
+        cmd_data: dict[str, int] = {
+            row[0]: row[1] async for row in await client.db.execute(query)}
+        lines = [f'`/{command}`: {count} uses'
+                 for command, count in cmd_data.items()]
+        embeds.append(discord.Embed(
+            title='Global command stats',
+            description='\n'.join(lines),
+            color=discord.Color.yellow()))
+        # guild stats
+        if ctx.guild is not None:
+            query = 'SELECT cmd_name, SUM(usage_count) ' \
+                'FROM guild_stats WHERE guild_id=? GROUP BY cmd_name'
+            cmd_data: dict[str, int] = {
+                row[0]: row[1] async for row in
+                await client.db.execute(query, (ctx.guild.id,))}
+            if cmd_data:
+                lines = [f'`/{command}`: {count} uses'
+                        for command, count in cmd_data.items()]
+                embeds.append(discord.Embed(
+                    title=f'{guild_name} command stats',
+                    description='\n'.join(lines),
+                    color=discord.Color.blue()))
+    await ctx.edit_original_response(embeds=embeds)
 
 ### DYNAMIC COMMANDS TECH ###
 
@@ -482,14 +642,6 @@ async def cmd_name_check(ctx: discord.Interaction, name: str) -> bool:
 cmd.add_check(cmd_check)
 del_cmd.add_check(cmd_check)
 del_cmd.add_check(del_check)
-
-async def wakeup():
-    while 1:
-        try:
-            await asyncio.sleep(1)
-        except:
-            await client.close()
-            return
 
 load_guild(None)
 for sid in os.listdir(Path('sounds') / '.guild'):
