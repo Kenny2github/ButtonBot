@@ -264,7 +264,7 @@ async def stats(ctx: discord.Interaction, command: Optional[str] = None):
     else:
         # global stats
         query = 'SELECT cmd_name, SUM(usage_count) ' \
-            'FROM global_stats GROUP BY cmd_name'
+            'FROM global_stats GROUP BY cmd_name ORDER BY SUM(usage_count)'
         cmd_data: dict[str, int] = {
             row[0]: row[1] async for row in await client.db.execute(query)}
         lines = [f'`/{command}`: {count} uses'
@@ -276,7 +276,8 @@ async def stats(ctx: discord.Interaction, command: Optional[str] = None):
         # guild stats
         if ctx.guild is not None:
             query = 'SELECT cmd_name, SUM(usage_count) ' \
-                'FROM guild_stats WHERE guild_id=? GROUP BY cmd_name'
+                'FROM guild_stats WHERE guild_id=? '\
+                'GROUP BY cmd_name ORDER BY SUM(usage_count)'
             cmd_data: dict[str, int] = {
                 row[0]: row[1] async for row in
                 await client.db.execute(query, (ctx.guild.id,))}
