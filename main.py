@@ -482,7 +482,16 @@ async def try_save_ytd(ctx: discord.Interaction,
     fn = root / 'sound.m4a'
     logger.debug('Saving youtube-dl link %s to %s', link, fn)
     try:
-        cmd = [sys.executable, '-m', 'youtube_dl', link.strip(), '-f', 'm4a', '-o', fn]
+        cmd = [
+            sys.executable, '-m', 'youtube_dl',
+            link.strip(),
+            # if no audio format is available, use worst with video
+            '-f', 'bestaudio/worst',
+            # no-op if bestaudio is m4a
+            '-x', '--audio-format', 'm4a',
+            # output file is deleted after -x
+            '-o', str(fn).replace('.m4a', '.%(ext)s'),
+        ]
         logger.debug('Executing: %s', cmd)
         proc = await asyncio.create_subprocess_exec(
             *cmd,
