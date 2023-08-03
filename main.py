@@ -632,11 +632,12 @@ async def cmd(ctx: discord.Interaction,
 async def del_cmd(ctx: discord.Interaction, name: str):
     """Remove a command, if it exists."""
     assert ctx.guild is not None
+    await ctx.response.defer(ephemeral=True)
     root = guild_root(ctx.guild.id) / name
     shutil.rmtree(root, True)
     load_guild(ctx.guild.id)
     await client.tree.sync(guild=ctx.guild)
-    await ctx.response.send_message(f'Removed `/{name}` if it exists')
+    await ctx.edit_original_response(content=f'Removed `/{name}` if it exists')
 
 async def cmd_check(ctx: discord.Interaction) -> bool:
     assert isinstance(ctx.user, discord.Member)
